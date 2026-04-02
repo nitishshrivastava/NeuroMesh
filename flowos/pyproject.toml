@@ -1,0 +1,117 @@
+[tool.uv.workspace]
+members = [
+    "packages/core",
+    "packages/cli",
+    "packages/orchestrator",
+    "packages/api",
+    "packages/workers",
+    "packages/ai",
+    "packages/policy",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flowos"
+version = "0.1.0"
+description = "FlowOS — Distributed Human + Machine Orchestration Platform"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "FlowOS Team" },
+]
+
+dependencies = [
+    # Durable orchestration
+    "temporalio>=1.7.0",
+
+    # Event bus
+    "confluent-kafka>=2.6.0",
+
+    # CLI framework
+    "click>=8.1.7",
+
+    # API framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+
+    # Database ORM and migrations
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14.0",
+
+    # Git workspace management
+    "gitpython>=3.1.43",
+
+    # Data validation and settings
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+
+    # AI reasoning frameworks
+    "langgraph>=0.2.55",
+    "langchain>=0.3.10",
+    "langchain-community>=0.3.10",
+
+    # HTTP client
+    "httpx>=0.28.0",
+
+    # Async support
+    "anyio>=4.7.0",
+
+    # Structured logging
+    "structlog>=24.4.0",
+
+    # YAML parsing for workflow DSL
+    "pyyaml>=6.0.2",
+
+    # Async Postgres driver
+    "asyncpg>=0.30.0",
+    "psycopg2-binary>=2.9.10",
+
+    # AWS S3 compatible storage
+    "boto3>=1.35.0",
+
+    # Utilities
+    "python-dotenv>=1.0.1",
+    "tenacity>=9.0.0",
+    "rich>=13.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "types-pyyaml>=6.0.12",
+    "httpx>=0.28.0",
+]
+
+[project.scripts]
+flowos = "flowos.cli.main:cli"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["shared", "packages"]

@@ -1,0 +1,104 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── FlowOS Design Tokens ─────────────────────────────────────────────────── */
+:root {
+  --flowos-bg: #0f1117;
+  --flowos-surface: #1a1d27;
+  --flowos-surface-2: #22263a;
+  --flowos-border: #2e3347;
+  --flowos-text: #e2e8f0;
+  --flowos-text-muted: #8892a4;
+  --flowos-accent: #6366f1;
+  --flowos-accent-hover: #818cf8;
+  --flowos-success: #22c55e;
+  --flowos-warning: #f59e0b;
+  --flowos-error: #ef4444;
+  --flowos-info: #3b82f6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--flowos-bg);
+  color: var(--flowos-text);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── React Flow overrides ──────────────────────────────────────────────────── */
+.react-flow__background {
+  background-color: var(--flowos-bg) !important;
+}
+
+.react-flow__controls {
+  background: var(--flowos-surface) !important;
+  border: 1px solid var(--flowos-border) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  background: var(--flowos-surface) !important;
+  border-bottom: 1px solid var(--flowos-border) !important;
+  color: var(--flowos-text-muted) !important;
+  fill: var(--flowos-text-muted) !important;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--flowos-surface-2) !important;
+  color: var(--flowos-text) !important;
+  fill: var(--flowos-text) !important;
+}
+
+.react-flow__minimap {
+  background: var(--flowos-surface) !important;
+  border: 1px solid var(--flowos-border) !important;
+  border-radius: 8px !important;
+}
+
+.react-flow__edge-path {
+  stroke: var(--flowos-border) !important;
+  stroke-width: 2 !important;
+}
+
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: var(--flowos-accent) !important;
+}
+
+/* ─── Spin animation ────────────────────────────────────────────────────────── */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ─── Scrollbar ─────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--flowos-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--flowos-text-muted);
+}

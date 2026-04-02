@@ -1,0 +1,185 @@
+{
+  "exploration_summary": "FlowOS is a greenfield distributed orchestration platform described in a single comprehensive design document (`flowos_full_design_v2.md`, ~1,310 lines, 26 sections). There is no existing code — this is a pure design-to-implementation task. The system is described as a 'stateful collaboration OS' where humans, machines, and AI agents all act as first-class agents collaborating through durable, event-driven workflows. The architecture has 7 major layers: (1) Orchestrator (Temporal for durable workflow execution), (2) Event Bus (NATS or Kafka), (3) CLI Agent (Python or Go, runs on every node), (4) AI Reasoning (LangGraph + LangChain as pluggable modules inside task boundaries), (5) Execution (Kubernetes + Argo Workflows), (6) State/Metadata (Postgres + optional Neo4j + optional vector store), and (7) UI (React + React Flow + WebSockets). Every node maintains a local Git-backed workspace with a defined directory structure under `/flowos/workspaces/{workflow_id}/{task_id}/`. Eight domain entities are fully specified with JSON schemas: Workflow, Task, Agent, Event, Workspace, Checkpoint, Handoff, and ReasoningRun. A YAML-based workflow DSL is defined. The MVP is broken into 3 phases: Phase 1 (Temporal + event bus + CLI + Git workspace + checkpoint/revert + handoff), Phase 2 (machine workers + build/test + LangChain tools + artifact storage + UI), Phase 3 (LangGraph reasoning + policy engine + workflow DSL + branch lineage). Key open decisions include: event bus technology choice (NATS vs Kafka), CLI language (Python vs Go), MVP scope boundaries, testing strategy, and authentication/authorization design.",
+
+  "detailed_exploration_notes": "FlowOS is a greenfield system — only a design document exists, no code. The design is 26 sections covering vision, architecture, domain models, CLI commands, Git strategy, DSL, tech stack, and a 3-phase MVP plan. Architecture has 7 layers: Temporal (orchestrator), NATS/Kafka (event bus), CLI agent (Python or Go), LangGraph+LangChain (AI reasoning inside task boundaries), K8s+Argo (execution), Postgres+S3+optional Neo4j/vector store (state/metadata), React+React Flow (UI). Eight domain entities are fully JSON-specified: Workflow (id, name, status, current_state, created_by, metadata), Task (id, workflow_id, type, status, assigned_to, input, output, dependencies, metadata), Agent (id, type, capabilities, current_task, status, machine_info), Event (id, type, source_agent, target, payload, timestamp), Workspace (workspace_id, workflow_id, task_id, agent_id, root_path, branch, head_commit, status), Checkpoint (checkpoint_id, workflow_id, task_id, agent_id, branch, commit, label, timestamp, note), Handoff (handoff_id, workflow_id, task_id, from_agent, to_agent, branch, commit, checkpoint_id, summary, open_issues, next_action), ReasoningRun (reasoning_run_id, task_id, framework, graph_name, inputs, outputs, status). Node workspace structure: /flowos/workspaces/{workflow_id}/{task_id}/ with repo/, .flowos/state.json, .flowos/checkpoints.json, .flowos/task_context.json, .flowos/agent_identity.json, .flowos/event_buffer.json, .flowos/reasoning_trace.json, artifacts/, logs/, patches/. Git strategy: branches named wf/{workflow_id}/{task_name}, tags for checkpoints/builds/handoffs/reviews, structured commit messages with [wf:][task:][agent:] prefixes. 19 event types defined. CLI commands defined for human, machine, and AI node types. YAML workflow DSL defined with step types (human, machine, ai), dependencies, checkpoint_policy, runtime, artifacts. MVP Phase 1 is the critical path: Temporal + event bus + CLI + Git workspace + checkpoint/revert + handoff. Key risks: Temporal learning curve, Git workspace management at scale, event bus choice lock-in, CLI language ecosystem tradeoffs, no testing strategy defined, no auth/authz design, UI complexity, scope creep across 3 phases.",
+
+  "tech_stack": {
+    "language": "Python or Go (CLI agent — not yet decided)",
+    "framework": "Temporal (durable orchestration) + NATS or Kafka (event bus)",
+    "key_libraries": [
+      "Temporal SDK - durable workflow execution, signals, activities, timers",
+      "LangGraph - graph-based AI reasoning inside task boundaries",
+      "LangChain - LLM abstraction, RAG, tool integration",
+      "GitPython or native git - local workspace management per node",
+      "React Flow - workflow graph visualization in UI",
+      "Argo Workflows - Kubernetes-based compute execution",
+      "Argo Events - infrastructure-triggered job orchestration"
+    ],
+    "database": "Postgres (structured metadata) + S3-compatible object storage (artifacts/snapshots) + optional Neo4j (graph/lineage) + optional Qdrant/pgvector (vector store)",
+    "testing": "Not defined in design document — needs to be established"
+  },
+
+  "questions": [
+    {
+      "id": 1,
+      "question": "Which MVP phase should the implementation plan focus on first, and how strictly should scope be bounded?",
+      "context": "The design defines 3 MVP phases. Phase 1 alone (Temporal + event bus + CLI + Git workspace + checkpoint/revert + handoff) is already a substantial system. Without clear scope boundaries, the plan could sprawl across all 3 phases and never reach a working state.",
+      "options": [
+        {
+          "id": "A",
+          "label": "Phase 1 only — strict MVP",
+          "description": "Implement only Phase 1: Temporal orchestration, event bus, CLI agent, local Git workspace, checkpoint/revert, and basic handoff. No UI, no AI integration, no machine workers. Produces a working but minimal system."
+        },
+        {
+          "id": "B",
+          "label": "Phase 1 + Phase 2 core",
+          "description": "Implement Phase 1 fully plus the most critical Phase 2 items: machine execution workers, basic UI visualization, and artifact storage. Skips LangChain/LangGraph integration for now. Produces a usable system with visibility."
+        },
+        {
+          "id": "C",
+          "label": "All 3 phases — full design",
+          "description": "Plan and implement all 3 phases end-to-end: full orchestration, AI reasoning, policy engine, workflow DSL, branch lineage, and UI. Comprehensive but high-risk and long timeline."
+        }
+      ],
+      "default": "A"
+    },
+    {
+      "id": 2,
+      "question": "Which language should be used for the CLI agent and backend services?",
+      "context": "The design suggests Python or Go for the CLI agent. This decision affects the entire codebase — LangChain/LangGraph have first-class Python support, while Go offers better performance and distribution for CLI tools. The backend services (Temporal workers, event bus consumers) also need a language choice.",
+      "options": [
+        {
+          "id": "A",
+          "label": "Python throughout",
+          "description": "Use Python for CLI agent, Temporal workers, and backend services. Best ecosystem fit for LangChain/LangGraph AI integration. Easier to prototype but slower runtime and harder to distribute as a standalone CLI binary."
+        },
+        {
+          "id": "B",
+          "label": "Go for CLI, Python for AI services",
+          "description": "Use Go for the CLI agent and core backend services (fast, single binary distribution, strong Temporal Go SDK), and Python microservices for AI reasoning tasks (LangGraph/LangChain). Polyglot but clean separation of concerns."
+        },
+        {
+          "id": "C",
+          "label": "Go throughout",
+          "description": "Use Go for everything including AI integration layers. Requires wrapping LangChain/LangGraph via subprocess calls or HTTP APIs. Best performance and distribution but loses native AI framework integration."
+        }
+      ],
+      "default": "A"
+    },
+    {
+      "id": 3,
+      "question": "Which event bus technology should be used for the initial implementation?",
+      "context": "The design offers NATS (lightweight, low-latency), Kafka (enterprise-scale, replayable), or Redis Streams (small setups). This is a foundational infrastructure decision that is difficult to change later and affects event replay, durability, and operational complexity.",
+      "options": [
+        {
+          "id": "A",
+          "label": "NATS JetStream",
+          "description": "Use NATS with JetStream for persistence and replay. Simpler to operate than Kafka, lower latency, good for the MVP. Can be replaced with Kafka later if scale demands it. Best fit for Phase 1."
+        },
+        {
+          "id": "B",
+          "label": "Apache Kafka",
+          "description": "Use Kafka from the start. Better event replay semantics, stronger durability guarantees, and enterprise-grade. Higher operational complexity but avoids a future migration. Best if production scale is the immediate target."
+        },
+        {
+          "id": "C",
+          "label": "Redis Streams (MVP only)",
+          "description": "Use Redis Streams for the MVP to minimize infrastructure complexity, with a planned migration to NATS or Kafka before production. Fastest to get started but creates technical debt."
+        }
+      ],
+      "default": "A"
+    },
+    {
+      "id": 4,
+      "question": "What should the authentication and authorization model be for agents and users?",
+      "context": "The design mentions tokens or mTLS for agent authentication and role-based assignment control, but provides no specifics. This affects how human users log in, how machine agents are provisioned, how AI nodes are authorized, and how the policy engine enforces access controls.",
+      "options": [
+        {
+          "id": "A",
+          "label": "JWT tokens + RBAC",
+          "description": "Use JWT tokens for all agent types (human, machine, AI) with role-based access control enforced at the orchestrator and event bus level. Simple to implement, widely understood, good for MVP."
+        },
+        {
+          "id": "B",
+          "label": "mTLS for machines + JWT for humans",
+          "description": "Use mTLS certificates for machine and AI agents (stronger identity guarantees for automated nodes) and JWT/OAuth2 for human users. More secure but higher operational complexity for certificate management."
+        },
+        {
+          "id": "C",
+          "label": "API keys (MVP) with auth upgrade later",
+          "description": "Use simple API keys for the MVP to unblock development, with a planned upgrade to JWT/mTLS before production. Fastest path to a working system but defers security hardening."
+        }
+      ],
+      "default": "A"
+    },
+    {
+      "id": 5,
+      "question": "What testing strategy should be established for this system?",
+      "context": "The design document defines no testing strategy. FlowOS involves Temporal workflows, event bus integration, Git operations, AI framework calls, and a CLI — each requiring different testing approaches. Without a clear strategy, coverage will be inconsistent and the system will be fragile.",
+      "options": [
+        {
+          "id": "A",
+          "label": "Unit + integration + Temporal replay tests",
+          "description": "Unit tests for domain logic and CLI commands, integration tests for event bus and Git operations, and Temporal's built-in workflow replay testing for orchestration logic. Comprehensive and aligned with Temporal best practices."
+        },
+        {
+          "id": "B",
+          "label": "Unit tests only for MVP",
+          "description": "Focus on unit tests for the MVP to move fast, with integration and e2e tests added in Phase 2. Faster initial development but higher risk of integration bugs going undetected."
+        },
+        {
+          "id": "C",
+          "label": "BDD/scenario-driven e2e tests",
+          "description": "Define end-to-end scenarios (e.g., 'Design → Code → Build → Review' workflow) as the primary test suite, with unit tests only for critical utilities. Tests mirror real usage but are slower to write and run."
+        }
+      ],
+      "default": "A"
+    },
+    {
+      "id": 6,
+      "question": "How should the UI be prioritized and scoped in the implementation plan?",
+      "context": "The design specifies a rich UI with workflow graph visualization, live state, event timeline, diff viewer, replay controls, and AI trace viewer. This is substantial frontend work. The question is whether UI should be built in parallel with the backend or deferred until the core system is stable.",
+      "options": [
+        {
+          "id": "A",
+          "label": "CLI-first, UI deferred to Phase 2",
+          "description": "Build the complete CLI and backend in Phase 1 with no UI. Add the React + React Flow UI in Phase 2 once the backend APIs are stable. Reduces Phase 1 scope significantly and avoids building UI against unstable APIs."
+        },
+        {
+          "id": "B",
+          "label": "Minimal read-only UI in Phase 1",
+          "description": "Build a minimal read-only dashboard (workflow list, task status, event stream) in Phase 1 alongside the CLI. Full interactive UI (graph, diff viewer, replay) deferred to Phase 2. Provides visibility without full UI complexity."
+        },
+        {
+          "id": "C",
+          "label": "Full UI built in parallel",
+          "description": "Build the full UI in parallel with the backend from the start. Requires a stable API contract early and a dedicated frontend effort. Produces the most complete system but highest parallel complexity."
+        }
+      ],
+      "default": "A"
+    },
+    {
+      "id": 7,
+      "question": "How should the implementation be broken down and validated — monorepo or separate services?",
+      "context": "FlowOS has multiple distinct components: Temporal workers, CLI agent, event bus consumers, AI reasoning services, UI, and metadata API. These can be organized as a monorepo (single repo, multiple packages) or as separate repositories/services. This affects development velocity, deployment, and testing.",
+      "options": [
+        {
+          "id": "A",
+          "label": "Monorepo with clear package boundaries",
+          "description": "Single repository with packages for: core domain models, Temporal workflows/activities, CLI agent, event bus adapters, AI reasoning adapters, metadata API, and UI. Easier to develop and test together, single source of truth for interfaces."
+        },
+        {
+          "id": "B",
+          "label": "Separate repos per service",
+          "description": "Separate repositories for each major service (orchestrator, CLI, event consumers, AI service, UI). Better for independent deployment and team ownership but higher coordination overhead for a small team."
+        },
+        {
+          "id": "C",
+          "label": "Monorepo with Docker Compose for local dev",
+          "description": "Monorepo with Docker Compose for local development and testing of all services together. Each service is independently deployable but developed in a single repo. Best balance of development velocity and deployment flexibility."
+        }
+      ],
+      "default": "C"
+    }
+  ]
+}

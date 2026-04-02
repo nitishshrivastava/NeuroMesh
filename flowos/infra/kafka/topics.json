@@ -1,0 +1,193 @@
+{
+  "_comment": "FlowOS Kafka Topic Definitions. All topics use 12 partitions for horizontal scalability. Retention is set per topic based on operational requirements.",
+  "topics": [
+    {
+      "name": "flowos.workflow.events",
+      "description": "Lifecycle events for workflows: WORKFLOW_CREATED, WORKFLOW_STARTED, WORKFLOW_PAUSED, WORKFLOW_RESUMED, WORKFLOW_COMPLETED, WORKFLOW_FAILED, WORKFLOW_CANCELLED.",
+      "partitions": 12,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "604800000",
+        "retention.bytes": "-1",
+        "cleanup.policy": "delete",
+        "compression.type": "snappy",
+        "min.insync.replicas": "1",
+        "message.timestamp.type": "CreateTime",
+        "segment.ms": "86400000",
+        "max.message.bytes": "1048576"
+      }
+    },
+    {
+      "name": "flowos.task.events",
+      "description": "Lifecycle events for tasks: TASK_CREATED, TASK_ASSIGNED, TASK_ACCEPTED, TASK_STARTED, TASK_UPDATED, TASK_CHECKPOINTED, TASK_COMPLETED, TASK_FAILED, TASK_REVERT_REQUESTED, TASK_HANDOFF_REQUESTED, TASK_HANDOFF_ACCEPTED.",
+      "partitions": 12,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "604800000",
+        "retention.bytes": "-1",
+        "cleanup.policy": "delete",
+        "compression.type": "snappy",
+        "min.insync.replicas": "1",
+        "message.timestamp.type": "CreateTime",
+        "segment.ms": "86400000",
+        "max.message.bytes": "1048576"
+      }
+    },
+    {
+      "name": "flowos.agent.events",
+      "description": "Agent registration and status events: AGENT_REGISTERED, AGENT_ONLINE, AGENT_OFFLINE, AGENT_BUSY, AGENT_IDLE, AGENT_CAPABILITY_UPDATED.",
+      "partitions": 12,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "259200000",
+        "retention.bytes": "-1",
+        "cleanup.policy": "delete",
+        "compression.type": "snappy",
+        "min.insync.replicas": "1",
+        "message.timestamp.type": "CreateTime",
+        "segment.ms": "86400000",
+        "max.message.bytes": "524288"
+      }
+    },
+    {
+      "name": "flowos.build.events",
+      "description": "Build and execution events: BUILD_TRIGGERED, BUILD_STARTED, BUILD_SUCCEEDED, BUILD_FAILED, TEST_STARTED, TEST_FINISHED, TEST_PASSED, TEST_FAILED, ARTIFACT_UPLOADED.",
+      "partitions": 12,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "604800000",
+        "retention.bytes": "-1",
+        "cleanup.policy": "delete",
+        "compression.type": "snappy",
+        "min.insync.replicas": "1",
+        "message.timestamp.type": "CreateTime",
+        "segment.ms": "86400000",
+        "max.message.bytes": "2097152"
+      }
+    },
+    {
+      "name": "flowos.ai.events",
+      "description": "AI reasoning and suggestion events: AI_TASK_STARTED, AI_SUGGESTION_CREATED, AI_PATCH_PROPOSED, AI_REVIEW_COMPLETED, AI_REASONING_TRACE, AI_TOOL_CALLED.",
+      "partitions": 12,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "604800000",
+        "retention.bytes": "-1",
+        "cleanup.policy": "delete",
+        "compression.type": "snappy",
+        "min.insync.replicas": "1",
+        "message.timestamp.type": "CreateTime",
+        "segment.ms": "86400000",
+        "max.message.bytes": "4194304"
+      }
+    },
+    {
+      "name": "flowos.workspace.events",
+      "description": "Workspace and Git state events: WORKSPACE_CREATED, WORKSPACE_SYNCED, CHECKPOINT_CREATED, CHECKPOINT_REVERTED, BRANCH_CREATED, HANDOFF_PREPARED, SNAPSHOT_CREATED.",
+      "partitions": 12,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "604800000",
+        "retention.bytes": "-1",
+        "cleanup.policy": "delete",
+        "compression.type": "snappy",
+        "min.insync.replicas": "1",
+        "message.timestamp.type": "CreateTime",
+        "segment.ms": "86400000",
+        "max.message.bytes": "1048576"
+      }
+    },
+    {
+      "name": "flowos.policy.events",
+      "description": "Policy engine events: POLICY_EVALUATED, POLICY_VIOLATION_DETECTED, APPROVAL_REQUESTED, APPROVAL_GRANTED, APPROVAL_DENIED, BRANCH_PROTECTION_TRIGGERED.",
+      "partitions": 12,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "2592000000",
+        "retention.bytes": "-1",
+        "cleanup.policy": "delete",
+        "compression.type": "snappy",
+        "min.insync.replicas": "1",
+        "message.timestamp.type": "CreateTime",
+        "segment.ms": "86400000",
+        "max.message.bytes": "524288"
+      }
+    },
+    {
+      "name": "flowos.observability.events",
+      "description": "Observability and metrics events: METRIC_RECORDED, TRACE_SPAN_STARTED, TRACE_SPAN_ENDED, HEALTH_CHECK_RESULT, SYSTEM_ALERT. Used by the UI real-time feed and monitoring systems.",
+      "partitions": 12,
+      "replication_factor": 1,
+      "config": {
+        "retention.ms": "86400000",
+        "retention.bytes": "10737418240",
+        "cleanup.policy": "delete",
+        "compression.type": "snappy",
+        "min.insync.replicas": "1",
+        "message.timestamp.type": "CreateTime",
+        "segment.ms": "3600000",
+        "max.message.bytes": "524288"
+      }
+    }
+  ],
+  "consumer_groups": {
+    "_comment": "Defined consumer groups and their topic subscriptions for documentation purposes.",
+    "flowos-orchestrator": {
+      "description": "Temporal workflow orchestrator — consumes all event topics to drive workflow state transitions.",
+      "topics": [
+        "flowos.workflow.events",
+        "flowos.task.events",
+        "flowos.agent.events",
+        "flowos.build.events",
+        "flowos.ai.events",
+        "flowos.workspace.events",
+        "flowos.policy.events"
+      ]
+    },
+    "flowos-api": {
+      "description": "REST API server — consumes events to update metadata store and serve real-time state.",
+      "topics": [
+        "flowos.workflow.events",
+        "flowos.task.events",
+        "flowos.agent.events",
+        "flowos.build.events",
+        "flowos.workspace.events"
+      ]
+    },
+    "flowos-ui-stream": {
+      "description": "UI WebSocket/SSE bridge — tails all topics to push real-time updates to connected browsers.",
+      "topics": [
+        "flowos.workflow.events",
+        "flowos.task.events",
+        "flowos.agent.events",
+        "flowos.build.events",
+        "flowos.ai.events",
+        "flowos.workspace.events",
+        "flowos.policy.events",
+        "flowos.observability.events"
+      ]
+    },
+    "flowos-policy-engine": {
+      "description": "Policy engine — evaluates task and workflow events against RBAC rules and approval gates.",
+      "topics": [
+        "flowos.workflow.events",
+        "flowos.task.events",
+        "flowos.workspace.events",
+        "flowos.build.events"
+      ]
+    },
+    "flowos-observability": {
+      "description": "Observability layer — captures all events for metrics, tracing, and replay.",
+      "topics": [
+        "flowos.workflow.events",
+        "flowos.task.events",
+        "flowos.agent.events",
+        "flowos.build.events",
+        "flowos.ai.events",
+        "flowos.workspace.events",
+        "flowos.policy.events",
+        "flowos.observability.events"
+      ]
+    }
+  }
+}

@@ -1,0 +1,267 @@
+# examples/feature_delivery_pipeline.yaml
+#
+# FlowOS Feature Delivery Pipeline — Extended 6-Step Workflow
+#
+# Full end-to-end workflow for delivering a software feature from design
+# through implementation, AI-assisted code review, build/test, human review,
+# and final publication.
+#
+# Workflow topology (dependency graph):
+#
+#   design ──► implement ──► ai-review ──► build ──► review ──► publish
+#                                  └──────────────────────────────────►
+#
+# Steps:
+#   1. design      — AI agent analyses requirements and produces a design doc
+#   2. implement   — Human agent implements the feature on a feature branch
+#   3. ai-review   — AI agent performs automated code review and suggests fixes
+#   4. build       — Machine worker compiles, tests, and produces artifacts
+#   5. review      — Human agent performs final code review and approves/rejects
+#   6. publish     — Machine worker merges the branch and publishes artifacts
+#
+# Usage:
+#   flowos workflow start --definition examples/feature_delivery_pipeline.yaml
+#   flowos workflow start --definition examples/feature_delivery_pipeline.yaml \
+#       --input feature_branch=feat/my-feature \
+#       --input ticket_id=JIRA-123 \
+#       --input require_approval=true
+#
+# Validate only (no Temporal submission):
+#   flowos workflow validate --definition examples/feature_delivery_pipeline.yaml
+
+name: feature-delivery-pipeline
+version: "1.0.0"
+description: >
+  Full end-to-end feature delivery workflow.
+  Orchestrates design (AI), implementation (human), AI-assisted code review,
+  build/test (machine), human code review, and artifact publication for a
+  software feature.  Demonstrates parallel AI review + build fan-out and
+  approval-gated merge.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime inputs — can be overridden with --input key=value at start time
+# ─────────────────────────────────────────────────────────────────────────────
+inputs:
+  # Source control
+  feature_branch: "main"
+  base_branch: "main"
+  ticket_id: null
+  repo_url: null
+
+  # Agent assignment (null = auto-assign from pool)
+  design_agent_id: null
+  implement_agent_id: null
+  ai_review_agent_id: null
+  build_agent_id: null
+  review_agent_id: null
+  publish_agent_id: null
+
+  # Workflow behaviour
+  require_approval: true
+  auto_assign: true
+  notify_on_completion: true
+
+  # Build configuration
+  build_command: "make build test"
+  test_command: "make test"
+  artifact_bucket: "artifacts"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Outputs — collected from completed steps and surfaced to the caller
+# ─────────────────────────────────────────────────────────────────────────────
+outputs:
+  design_doc: null
+  implementation_summary: null
+  ai_review_report: null
+  artifact_url: null
+  test_report_url: null
+  review_status: null
+  publish_status: null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workflow steps — executed in dependency order
+# ─────────────────────────────────────────────────────────────────────────────
+steps:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Step 1: Design
+  # AI agent analyses the ticket requirements and produces a detailed design
+  # document covering architecture decisions, file changes, API contracts,
+  # test strategy, and estimated effort.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: design
+    name: "Design Feature"
+    description: >
+      AI agent analyses the ticket requirements and produces a detailed design
+      document.  The document covers architecture decisions, affected files,
+      API contracts, data model changes, test strategy, and estimated effort.
+      Output is stored as a structured JSON artefact and referenced by the
+      implement step.
+    agent_type: ai
+    timeout_secs: 600
+    retry_count: 2
+    inputs:
+      ticket_id: "{{ inputs.ticket_id }}"
+      feature_branch: "{{ inputs.feature_branch }}"
+      base_branch: "{{ inputs.base_branch }}"
+      repo_url: "{{ inputs.repo_url }}"
+    tags:
+      - design
+      - ai
+      - planning
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Step 2: Implement
+  # Human agent implements the feature based on the design document produced
+  # in Step 1.  Uses the FlowOS workspace for Git-backed state tracking,
+  # checkpointing, and handoff support.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: implement
+    name: "Implement Feature"
+    description: >
+      Human agent implements the feature based on the design document produced
+      in the previous step.  The agent works on the feature branch, creating
+      checkpoints at meaningful milestones.  The workspace is Git-backed so
+      all state is reversible.  The agent may hand off to another human if
+      needed.
+    agent_type: human
+    depends_on:
+      - design
+    timeout_secs: 172800   # 48 hours
+    retry_count: 0
+    inputs:
+      design_doc: "{{ steps.design.outputs.design_doc }}"
+      feature_branch: "{{ inputs.feature_branch }}"
+      base_branch: "{{ inputs.base_branch }}"
+      ticket_id: "{{ inputs.ticket_id }}"
+    tags:
+      - implementation
+      - human
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Step 3: AI Code Review
+  # AI agent performs an automated code review of the implementation.
+  # Runs concurrently with the build step (both depend only on implement).
+  # Produces a structured review report with findings, severity ratings,
+  # and suggested fixes.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: ai-review
+    name: "AI Code Review"
+    description: >
+      AI agent performs an automated code review of the implementation.
+      The agent uses LangGraph to reason over the diff, check for common
+      issues (security, performance, style, test coverage), and produce a
+      structured review report.  Runs concurrently with the build step.
+      Findings are surfaced to the human reviewer in Step 5.
+    agent_type: ai
+    depends_on:
+      - implement
+    timeout_secs: 900
+    retry_count: 2
+    inputs:
+      feature_branch: "{{ inputs.feature_branch }}"
+      base_branch: "{{ inputs.base_branch }}"
+      implementation_summary: "{{ steps.implement.outputs.implementation_summary }}"
+    tags:
+      - ai-review
+      - ai
+      - quality
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Step 4: Build and Test
+  # Machine worker compiles the code, runs the full test suite, measures
+  # coverage, and produces build artifacts.  Runs concurrently with the AI
+  # review step.  Retries up to 3 times on transient infrastructure failures.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: build
+    name: "Build and Test"
+    description: >
+      Machine worker compiles the code, runs the full test suite, measures
+      coverage, and produces build artifacts.  Executed via Argo Workflows on
+      Kubernetes.  Artifacts are uploaded to MinIO (S3-compatible) and the
+      artifact URL is passed to the review step.  Retries up to 3 times on
+      transient infrastructure failures.  Runs concurrently with the AI review
+      step.
+    agent_type: build
+    depends_on:
+      - implement
+    timeout_secs: 3600
+    retry_count: 3
+    inputs:
+      feature_branch: "{{ inputs.feature_branch }}"
+      build_command: "{{ inputs.build_command }}"
+      test_command: "{{ inputs.test_command }}"
+      artifact_bucket: "{{ inputs.artifact_bucket }}"
+    tags:
+      - build
+      - test
+      - ci
+      - machine
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Step 5: Human Code Review
+  # Human agent reviews the implementation, AI review report, build results,
+  # and test coverage.  Approves or requests changes.  This is the approval
+  # gate before the feature is merged and published.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: review
+    name: "Code Review"
+    description: >
+      Human agent reviews the implementation, AI review report, build results,
+      and test coverage.  The reviewer has access to the full diff, the AI
+      review findings, and the build/test report.  The reviewer approves the
+      change or requests modifications.  This step is the approval gate before
+      the feature is merged and published.
+    agent_type: human
+    depends_on:
+      - ai-review
+      - build
+    timeout_secs: 86400   # 24 hours
+    retry_count: 0
+    inputs:
+      feature_branch: "{{ inputs.feature_branch }}"
+      base_branch: "{{ inputs.base_branch }}"
+      ai_review_report: "{{ steps.ai-review.outputs.ai_review_report }}"
+      artifact_url: "{{ steps.build.outputs.artifact_url }}"
+      test_report_url: "{{ steps.build.outputs.test_report_url }}"
+      require_approval: "{{ inputs.require_approval }}"
+    tags:
+      - review
+      - human
+      - approval-gate
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Step 6: Publish
+  # Machine worker merges the approved feature branch into the base branch,
+  # tags the release, and publishes the build artifacts to the artifact store.
+  # Only runs after the human review step approves the change.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: publish
+    name: "Publish Feature"
+    description: >
+      Machine worker merges the approved feature branch into the base branch,
+      creates a release tag, and publishes the build artifacts to the artifact
+      store.  Sends a completion notification if notify_on_completion is true.
+      Only runs after the human review step has approved the change.
+    agent_type: build
+    depends_on:
+      - review
+    timeout_secs: 1800
+    retry_count: 2
+    inputs:
+      feature_branch: "{{ inputs.feature_branch }}"
+      base_branch: "{{ inputs.base_branch }}"
+      artifact_url: "{{ steps.build.outputs.artifact_url }}"
+      review_status: "{{ steps.review.outputs.review_status }}"
+      notify_on_completion: "{{ inputs.notify_on_completion }}"
+    tags:
+      - publish
+      - merge
+      - release
+      - machine
+
+tags:
+  - feature
+  - delivery
+  - end-to-end
+  - six-step

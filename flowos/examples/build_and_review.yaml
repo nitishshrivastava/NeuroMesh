@@ -1,0 +1,192 @@
+# examples/build_and_review.yaml
+#
+# FlowOS Build and Review Pipeline — Simple 4-Step Workflow
+#
+# A lightweight workflow for running a build/test cycle and getting a human
+# code review.  Suitable for pull-request validation, hotfix branches, and
+# any scenario where you want automated build verification followed by a
+# human approval gate.
+#
+# Workflow topology (dependency graph):
+#
+#   prepare ──► build ──► ai-review ──► review
+#
+# Steps:
+#   1. prepare    — AI agent inspects the branch and prepares a change summary
+#   2. build      — Machine worker compiles, tests, and produces artifacts
+#   3. ai-review  — AI agent performs automated code review of the diff
+#   4. review     — Human agent reviews build results and AI findings, approves
+#
+# Usage:
+#   flowos workflow start --definition examples/build_and_review.yaml
+#   flowos workflow start --definition examples/build_and_review.yaml \
+#       --input feature_branch=feat/my-hotfix \
+#       --input base_branch=main
+#
+# Validate only (no Temporal submission):
+#   flowos workflow validate --definition examples/build_and_review.yaml
+
+name: build-and-review
+version: "1.0.0"
+description: >
+  Simple 4-step build and review workflow.
+  Runs an automated build/test cycle followed by an AI code review and a
+  human approval gate.  Suitable for pull-request validation and hotfix
+  branches.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime inputs — can be overridden with --input key=value at start time
+# ─────────────────────────────────────────────────────────────────────────────
+inputs:
+  # Source control
+  feature_branch: "main"
+  base_branch: "main"
+  repo_url: null
+
+  # Agent assignment (null = auto-assign from pool)
+  prepare_agent_id: null
+  build_agent_id: null
+  ai_review_agent_id: null
+  review_agent_id: null
+
+  # Build configuration
+  build_command: "make build test"
+  artifact_bucket: "artifacts"
+
+  # Workflow behaviour
+  require_approval: true
+  auto_assign: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Outputs — collected from completed steps and surfaced to the caller
+# ─────────────────────────────────────────────────────────────────────────────
+outputs:
+  change_summary: null
+  artifact_url: null
+  test_report_url: null
+  ai_review_report: null
+  review_status: null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workflow steps — executed in dependency order
+# ─────────────────────────────────────────────────────────────────────────────
+steps:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Step 1: Prepare
+  # AI agent inspects the feature branch diff against the base branch and
+  # produces a concise change summary.  This summary is passed to the build
+  # and review steps to provide context.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: prepare
+    name: "Prepare Change Summary"
+    description: >
+      AI agent inspects the feature branch diff against the base branch and
+      produces a concise change summary.  The summary describes what changed,
+      why, and any potential risks.  This context is passed to the build and
+      review steps.
+    agent_type: ai
+    timeout_secs: 300
+    retry_count: 2
+    inputs:
+      feature_branch: "{{ inputs.feature_branch }}"
+      base_branch: "{{ inputs.base_branch }}"
+      repo_url: "{{ inputs.repo_url }}"
+    tags:
+      - prepare
+      - ai
+      - analysis
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Step 2: Build and Test
+  # Machine worker compiles the code, runs the full test suite, measures
+  # coverage, and uploads build artifacts to the artifact store.
+  # Retries up to 3 times on transient infrastructure failures.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: build
+    name: "Build and Test"
+    description: >
+      Machine worker compiles the code, runs the full test suite, measures
+      coverage, and uploads build artifacts to MinIO (S3-compatible).
+      Executed via Argo Workflows on Kubernetes.  The artifact URL and test
+      report URL are passed to the review step.  Retries up to 3 times on
+      transient infrastructure failures.
+    agent_type: build
+    depends_on:
+      - prepare
+    timeout_secs: 3600
+    retry_count: 3
+    inputs:
+      feature_branch: "{{ inputs.feature_branch }}"
+      build_command: "{{ inputs.build_command }}"
+      artifact_bucket: "{{ inputs.artifact_bucket }}"
+      change_summary: "{{ steps.prepare.outputs.change_summary }}"
+    tags:
+      - build
+      - test
+      - ci
+      - machine
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Step 3: AI Code Review
+  # AI agent performs an automated code review of the diff.  Uses LangGraph
+  # to reason over the changes and produce a structured review report with
+  # findings, severity ratings, and suggested fixes.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: ai-review
+    name: "AI Code Review"
+    description: >
+      AI agent performs an automated code review of the diff.  Uses LangGraph
+      to reason over the changes, check for common issues (security,
+      performance, style, test coverage), and produce a structured review
+      report.  The report is surfaced to the human reviewer in the next step.
+    agent_type: ai
+    depends_on:
+      - build
+    timeout_secs: 600
+    retry_count: 2
+    inputs:
+      feature_branch: "{{ inputs.feature_branch }}"
+      base_branch: "{{ inputs.base_branch }}"
+      artifact_url: "{{ steps.build.outputs.artifact_url }}"
+      test_report_url: "{{ steps.build.outputs.test_report_url }}"
+      change_summary: "{{ steps.prepare.outputs.change_summary }}"
+    tags:
+      - ai-review
+      - ai
+      - quality
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Step 4: Human Code Review
+  # Human agent reviews the build results, test coverage, and AI review
+  # findings.  Approves or requests changes.  This is the final approval gate.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: review
+    name: "Code Review"
+    description: >
+      Human agent reviews the build results, test coverage report, and AI
+      review findings.  The reviewer approves the change or requests
+      modifications.  This is the final approval gate — the workflow completes
+      when the reviewer approves or rejects the change.
+    agent_type: human
+    depends_on:
+      - ai-review
+    timeout_secs: 86400   # 24 hours
+    retry_count: 0
+    inputs:
+      feature_branch: "{{ inputs.feature_branch }}"
+      base_branch: "{{ inputs.base_branch }}"
+      artifact_url: "{{ steps.build.outputs.artifact_url }}"
+      test_report_url: "{{ steps.build.outputs.test_report_url }}"
+      ai_review_report: "{{ steps.ai-review.outputs.ai_review_report }}"
+      require_approval: "{{ inputs.require_approval }}"
+    tags:
+      - review
+      - human
+      - approval-gate
+
+tags:
+  - build
+  - review
+  - ci
+  - four-step

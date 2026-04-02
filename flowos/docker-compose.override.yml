@@ -1,0 +1,183 @@
+---
+# FlowOS — Docker Compose Override for Local Development
+# This file is automatically merged with docker-compose.yml when running
+# `docker compose up` locally. It adds volume mounts for hot-reload and
+# exposes additional debug ports.
+#
+# DO NOT commit secrets or production values here.
+# Use a .env file or environment-specific overrides for sensitive data.
+
+version: "3.9"
+
+services:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Kafka — expose additional debug ports and mount custom config
+  # ───────────────────────────────────────────────────────────────────────────
+  kafka:
+    environment:
+      # Enable more verbose logging in dev
+      KAFKA_LOG4J_LOGGERS: >-
+        kafka.controller=INFO,
+        kafka.producer.async.DefaultEventHandler=INFO,
+        state.change.logger=INFO
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_TOOLS_LOG4J_LOGLEVEL: ERROR
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PostgreSQL — mount local init scripts for dev seed data
+  # ───────────────────────────────────────────────────────────────────────────
+  postgres:
+    environment:
+      # Increase log verbosity for development query debugging
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
+      # Mount a dev seed file if it exists (optional)
+      - ./infra/postgres/seed.sql:/docker-entrypoint-initdb.d/99_seed.sql:ro
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # FlowOS API — hot-reload development server
+  # Mounts the local source tree so code changes are reflected immediately.
+  # ───────────────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+      target: development
+    image: flowos-api:dev
+    container_name: flowos-api-dev
+    hostname: api
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "8000:8000"
+      - "5678:5678"   # debugpy remote debugger port
+    volumes:
+      # Mount entire source tree for hot-reload
+      - .:/app:cached
+      # Exclude virtual environments and caches from the mount
+      - /app/.venv
+      - /app/__pycache__
+    environment:
+      # Application settings
+      APP_ENV: development
+      APP_DEBUG: "true"
+      APP_LOG_LEVEL: DEBUG
+
+      # Database
+      DATABASE_URL: "postgresql+asyncpg://flowos:flowos_secret@postgres:5432/flowos"
+      DATABASE_SYNC_URL: "postgresql://flowos:flowos_secret@postgres:5432/flowos"
+
+      # Kafka
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9093"
+      KAFKA_SECURITY_PROTOCOL: PLAINTEXT
+
+      # Temporal
+      TEMPORAL_HOST: "temporal"
+      TEMPORAL_PORT: 7233
+      TEMPORAL_NAMESPACE: default
+
+      # S3 / MinIO
+      S3_ENDPOINT_URL: "http://minio:9000"
+      S3_ACCESS_KEY_ID: flowos_minio
+      S3_SECRET_ACCESS_KEY: flowos_minio_secret
+      S3_BUCKET_ARTIFACTS: artifacts
+      S3_BUCKET_SNAPSHOTS: snapshots
+      S3_BUCKET_CHECKPOINTS: checkpoints
+      S3_REGION: us-east-1
+
+      # Enable Python debugpy for IDE remote debugging
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    command: >
+      uvicorn packages.api.main:app
+        --host 0.0.0.0
+        --port 8000
+        --reload
+        --reload-dir /app/shared
+        --reload-dir /app/packages/api
+        --log-level debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    profiles:
+      - api
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # FlowOS Orchestrator Worker — hot-reload development mode
+  # ───────────────────────────────────────────────────────────────────────────
+  orchestrator:
+    build:
+      context: .
+      dockerfile: packages/orchestrator/Dockerfile
+      target: development
+    image: flowos-orchestrator:dev
+    container_name: flowos-orchestrator-dev
+    hostname: orchestrator
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "5679:5678"   # debugpy remote debugger port (offset to avoid conflict)
+    volumes:
+      - .:/app:cached
+      - /app/.venv
+      - /app/__pycache__
+    environment:
+      APP_ENV: development
+      APP_DEBUG: "true"
+      APP_LOG_LEVEL: DEBUG
+
+      DATABASE_URL: "postgresql+asyncpg://flowos:flowos_secret@postgres:5432/flowos"
+      DATABASE_SYNC_URL: "postgresql://flowos:flowos_secret@postgres:5432/flowos"
+
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9093"
+      KAFKA_SECURITY_PROTOCOL: PLAINTEXT
+
+      TEMPORAL_HOST: "temporal"
+      TEMPORAL_PORT: 7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: flowos-main
+
+      S3_ENDPOINT_URL: "http://minio:9000"
+      S3_ACCESS_KEY_ID: flowos_minio
+      S3_SECRET_ACCESS_KEY: flowos_minio_secret
+      S3_BUCKET_ARTIFACTS: artifacts
+      S3_BUCKET_SNAPSHOTS: snapshots
+      S3_BUCKET_CHECKPOINTS: checkpoints
+      S3_REGION: us-east-1
+
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    profiles:
+      - orchestrator
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # MinIO — expose console in dev (already in base, but ensure it's accessible)
+  # ───────────────────────────────────────────────────────────────────────────
+  minio:
+    environment:
+      # Enable verbose logging in dev
+      MINIO_LOG_LEVEL: DEBUG
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Temporal — additional dev configuration
+  # ───────────────────────────────────────────────────────────────────────────
+  temporal:
+    environment:
+      - LOG_LEVEL=debug
+      - TEMPORAL_BROADCAST_ADDRESS=127.0.0.1

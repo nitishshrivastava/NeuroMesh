@@ -1,0 +1,589 @@
+---
+# FlowOS — Docker Compose Service Definitions
+#
+# Infrastructure services:
+#   - Zookeeper        (Kafka coordination)
+#   - Kafka            (central event bus)
+#   - Kafka UI         (topic management web UI)
+#   - PostgreSQL       (structured metadata store)
+#   - Temporal         (durable workflow orchestration)
+#   - Temporal UI      (workflow visualization web UI)
+#   - MinIO            (S3-compatible artifact/snapshot store)
+#   - MinIO Init       (one-shot bucket creation)
+#
+# Application services (started with --profile app or --profile full):
+#   - api              (FastAPI REST + WebSocket server)
+#   - orchestrator     (Temporal worker — workflow + activity execution)
+#   - machine-worker   (Argo/build task executor)
+#   - ai-worker        (LangGraph AI reasoning worker)
+#   - observability    (Kafka consumer → metrics + audit log)
+#   - ui               (React + Vite frontend, served by nginx)
+#
+# Usage:
+#   # Infrastructure only (default):
+#   docker compose up -d
+#
+#   # Infrastructure + application services:
+#   docker compose --profile app up -d
+#
+#   # Everything including UI:
+#   docker compose --profile full up -d
+#
+#   # With override for local development hot-reload:
+#   docker compose -f docker-compose.yml -f docker-compose.override.yml --profile app up -d
+
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared Networks
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  flowos-net:
+    driver: bridge
+    name: flowos-net
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Named Volumes
+# ─────────────────────────────────────────────────────────────────────────────
+volumes:
+  zookeeper-data:
+    name: flowos-zookeeper-data
+  zookeeper-logs:
+    name: flowos-zookeeper-logs
+  kafka-data:
+    name: flowos-kafka-data
+  postgres-data:
+    name: flowos-postgres-data
+  temporal-data:
+    name: flowos-temporal-data
+  minio-data:
+    name: flowos-minio-data
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared environment anchors (reused across application services)
+# ─────────────────────────────────────────────────────────────────────────────
+x-app-env: &app-env
+  # Application
+  APP_ENV: ${APP_ENV:-development}
+  APP_DEBUG: ${APP_DEBUG:-false}
+  APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+  APP_SECRET_KEY: ${APP_SECRET_KEY:-change-me-in-production-use-a-long-random-string}
+
+  # Database
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://flowos:flowos_secret@postgres:5432/flowos}
+  DATABASE_SYNC_URL: ${DATABASE_SYNC_URL:-postgresql://flowos:flowos_secret@postgres:5432/flowos}
+
+  # Kafka
+  KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9093}
+  KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL:-PLAINTEXT}
+
+  # Temporal
+  TEMPORAL_HOST: ${TEMPORAL_HOST:-temporal}
+  TEMPORAL_PORT: ${TEMPORAL_PORT:-7233}
+  TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+  TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-flowos-main}
+
+  # S3 / MinIO
+  S3_ENDPOINT_URL: ${S3_ENDPOINT:-http://minio:9000}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-flowos_minio}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-flowos_minio_secret}
+  S3_BUCKET_ARTIFACTS: ${S3_BUCKET_ARTIFACTS:-artifacts}
+  S3_BUCKET_SNAPSHOTS: ${S3_BUCKET_SNAPSHOTS:-snapshots}
+  S3_BUCKET_CHECKPOINTS: ${S3_BUCKET_CHECKPOINTS:-checkpoints}
+  S3_REGION: ${S3_REGION:-us-east-1}
+
+  # OpenAI (AI worker)
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+  # Python
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+x-app-depends: &app-depends
+  postgres:
+    condition: service_healthy
+  kafka:
+    condition: service_healthy
+  temporal:
+    condition: service_started
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Services
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Zookeeper — Kafka coordination service
+  # ───────────────────────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.1
+    container_name: flowos-zookeeper
+    hostname: zookeeper
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_INIT_LIMIT: 5
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Kafka — Central event bus
+  # ───────────────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.7.1
+    container_name: flowos-kafka
+    hostname: kafka
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "9092:9092"       # External (host) access
+      - "9093:9093"       # Internal (container-to-container) access
+      - "9101:9101"       # JMX metrics
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+
+      # Listeners: PLAINTEXT for internal, EXTERNAL for host access
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9093,EXTERNAL://localhost:9092"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9093,EXTERNAL://0.0.0.0:9092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+
+      # Topic defaults
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: 12
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+
+      # Log retention
+      KAFKA_LOG_RETENTION_HOURS: 168        # 7 days
+      KAFKA_LOG_RETENTION_BYTES: -1
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824   # 1 GB
+
+      # Performance tuning
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # JMX
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+
+      # Schema registry compatibility
+      KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: ""
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "kafka-broker-api-versions"
+        - "--bootstrap-server"
+        - "localhost:9092"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Kafka UI — Web interface for Kafka topic management and monitoring
+  # ───────────────────────────────────────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: flowos-kafka-ui
+    hostname: kafka-ui
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: flowos-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:9093"
+      KAFKA_CLUSTERS_0_ZOOKEEPER: "zookeeper:2181"
+      DYNAMIC_CONFIG_ENABLED: "true"
+      AUTH_TYPE: "disabled"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PostgreSQL — Structured metadata store
+  # ───────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: flowos-postgres
+    hostname: postgres
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      POSTGRES_USER: flowos
+      POSTGRES_PASSWORD: flowos_secret
+      POSTGRES_DB: flowos
+      PGDATA: /var/lib/postgresql/data/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowos -d flowos"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Temporal — Durable workflow orchestration server
+  # ───────────────────────────────────────────────────────────────────────────
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    container_name: flowos-temporal
+    hostname: temporal
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "7233:7233"   # gRPC frontend
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=flowos
+      - POSTGRES_PWD=flowos_secret
+      - POSTGRES_SEEDS=postgres
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "temporal"
+        - "workflow"
+        - "list"
+        - "--address"
+        - "localhost:7233"
+        - "--namespace"
+        - "default"
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Temporal UI — Web interface for workflow visualization
+  # ───────────────────────────────────────────────────────────────────────────
+  temporal-ui:
+    image: temporalio/ui:2.32.0
+    container_name: flowos-temporal-ui
+    hostname: temporal-ui
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "8088:8080"
+    environment:
+      TEMPORAL_ADDRESS: "temporal:7233"
+      TEMPORAL_CORS_ORIGINS: "http://localhost:3000,http://localhost:5173"
+      TEMPORAL_UI_PORT: 8080
+    depends_on:
+      - temporal
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # MinIO — S3-compatible object storage for artifacts and snapshots
+  # ───────────────────────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    container_name: flowos-minio
+    hostname: minio
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO Console
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: flowos_minio
+      MINIO_ROOT_PASSWORD: flowos_minio_secret
+      MINIO_BROWSER_REDIRECT_URL: "http://localhost:9001"
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # MinIO Init — Creates default buckets on first run
+  # ───────────────────────────────────────────────────────────────────────────
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-17T19-35-25Z
+    container_name: flowos-minio-init
+    networks:
+      - flowos-net
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set flowos http://minio:9000 flowos_minio flowos_minio_secret;
+        mc mb --ignore-existing flowos/artifacts;
+        mc mb --ignore-existing flowos/snapshots;
+        mc mb --ignore-existing flowos/checkpoints;
+        mc mb --ignore-existing flowos/logs;
+        echo 'MinIO buckets initialized.';
+        exit 0;
+      "
+    restart: on-failure
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # APPLICATION SERVICES
+  # Started with: docker compose --profile app up -d
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # FlowOS API — FastAPI REST + WebSocket server
+  #
+  # Exposes:
+  #   - REST API:      http://localhost:8000/api/v1/
+  #   - WebSocket:     ws://localhost:8000/ws/
+  #   - Health check:  http://localhost:8000/health
+  #   - OpenAPI docs:  http://localhost:8000/docs
+  # ───────────────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: flowos-api:latest
+    container_name: flowos-api
+    hostname: api
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      <<: *app-env
+      # Agent identity (API server acts as a system agent)
+      FLOWOS_AGENT_ID: ${FLOWOS_AGENT_ID:-api-server}
+      FLOWOS_AGENT_TYPE: ${FLOWOS_AGENT_TYPE:-system}
+    depends_on:
+      <<: *app-depends
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    profiles:
+      - app
+      - full
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # FlowOS Orchestrator — Temporal worker for workflow + activity execution
+  #
+  # Registers all Temporal workflows and activities, polls the task queue,
+  # and executes workflow logic.  Emits Kafka events for every state change.
+  # ───────────────────────────────────────────────────────────────────────────
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    image: flowos-orchestrator:latest
+    container_name: flowos-orchestrator
+    hostname: orchestrator
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    environment:
+      <<: *app-env
+      FLOWOS_AGENT_ID: ${ORCHESTRATOR_AGENT_ID:-orchestrator}
+      FLOWOS_AGENT_TYPE: system
+    depends_on:
+      <<: *app-depends
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    profiles:
+      - app
+      - full
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # FlowOS Machine Worker — Build/test task executor
+  #
+  # Listens for task.assigned events on the Kafka bus, executes build and
+  # test tasks via Argo Workflows (Kubernetes), uploads artifacts to MinIO,
+  # and emits task.completed / task.failed events.
+  # ───────────────────────────────────────────────────────────────────────────
+  machine-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: flowos-machine-worker:latest
+    container_name: flowos-machine-worker
+    hostname: machine-worker
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    environment:
+      <<: *app-env
+      FLOWOS_AGENT_ID: ${MACHINE_WORKER_AGENT_ID:-machine-worker-01}
+      FLOWOS_AGENT_TYPE: machine
+      # Argo Workflows configuration
+      ARGO_SERVER_URL: ${ARGO_SERVER_URL:-http://argo-server:2746}
+      ARGO_NAMESPACE: ${ARGO_NAMESPACE:-argo}
+      ARGO_SERVICE_ACCOUNT: ${ARGO_SERVICE_ACCOUNT:-argo-workflow}
+      # Worker concurrency
+      WORKER_MAX_CONCURRENT_TASKS: ${WORKER_MAX_CONCURRENT_TASKS:-4}
+    depends_on:
+      <<: *app-depends
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    profiles:
+      - app
+      - full
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # FlowOS AI Worker — LangGraph/LangChain reasoning worker
+  #
+  # Listens for task.assigned events targeting AI agents, executes LangGraph
+  # reasoning graphs (code review, fix validation, design analysis), and
+  # emits task.completed events with structured AI outputs.
+  # ───────────────────────────────────────────────────────────────────────────
+  ai-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.ai
+    image: flowos-ai-worker:latest
+    container_name: flowos-ai-worker
+    hostname: ai-worker
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    environment:
+      <<: *app-env
+      FLOWOS_AGENT_ID: ${AI_WORKER_AGENT_ID:-ai-worker-01}
+      FLOWOS_AGENT_TYPE: ai
+      # LangChain / OpenAI
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-flowos}
+      # AI worker concurrency
+      AI_WORKER_MAX_CONCURRENT_TASKS: ${AI_WORKER_MAX_CONCURRENT_TASKS:-2}
+    depends_on:
+      <<: *app-depends
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    profiles:
+      - app
+      - full
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # FlowOS Observability Consumer — Kafka → metrics + audit log
+  #
+  # Subscribes to all Kafka topics, records structured metrics (Prometheus),
+  # writes an immutable audit log to PostgreSQL, and provides event replay
+  # capability for the UI.
+  # ───────────────────────────────────────────────────────────────────────────
+  observability:
+    build:
+      context: .
+      dockerfile: Dockerfile.observability
+    image: flowos-observability:latest
+    container_name: flowos-observability
+    hostname: observability
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "${METRICS_PORT:-9090}:9090"   # Prometheus metrics endpoint
+    environment:
+      <<: *app-env
+      FLOWOS_AGENT_ID: observability
+      FLOWOS_AGENT_TYPE: system
+      # Prometheus
+      METRICS_PORT: ${METRICS_PORT:-9090}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9090/metrics')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    profiles:
+      - app
+      - full
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # FlowOS UI — React + Vite frontend served by nginx
+  #
+  # Provides real-time workflow graph visualization, agent ownership panels,
+  # event timeline, checkpoint viewer, handoff panel, and AI trace viewer.
+  # Proxies /api and /ws to the API service.
+  #
+  # Accessible at: http://localhost:3000
+  # ───────────────────────────────────────────────────────────────────────────
+  ui:
+    build:
+      context: ../ui
+      dockerfile: Dockerfile
+    image: flowos-ui:latest
+    container_name: flowos-ui
+    hostname: ui
+    restart: unless-stopped
+    networks:
+      - flowos-net
+    ports:
+      - "${UI_PORT:-3000}:80"
+    environment:
+      # Injected at nginx startup via envsubst
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+      VITE_WS_BASE_URL: ${VITE_WS_BASE_URL:-ws://localhost:8000}
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    profiles:
+      - full
