@@ -1,7 +1,7 @@
 # FlowOS — Distributed Human + Machine Orchestration Platform
 # Makefile for local development and CI operations
 
-.PHONY: help up down migrate test lint format check install clean logs ps
+.PHONY: help up down migrate migrate-docker test lint format check install clean logs ps
 
 # Default target
 .DEFAULT_GOAL := help
@@ -73,9 +73,14 @@ logs-%: ## Tail logs from a specific service (e.g. make logs-kafka)
 # ─────────────────────────────────────────────────────────────────────────────
 # Database Migrations
 # ─────────────────────────────────────────────────────────────────────────────
-migrate: ## Run Alembic database migrations (upgrade to head)
-	@echo "$(BOLD)$(GREEN)▶ Running database migrations...$(RESET)"
+migrate: ## Run Alembic database migrations locally (upgrade to head)
+	@echo "$(BOLD)$(GREEN)▶ Running database migrations (local)...$(RESET)"
 	$(ALEMBIC) -c shared/db/alembic.ini upgrade head
+	@echo "$(BOLD)$(GREEN)✔ Migrations complete.$(RESET)"
+
+migrate-docker: ## Run Alembic database migrations inside the API Docker container
+	@echo "$(BOLD)$(GREEN)▶ Running database migrations (Docker)...$(RESET)"
+	$(COMPOSE) -f $(COMPOSE_FILE) exec api alembic -c shared/db/alembic.ini upgrade head
 	@echo "$(BOLD)$(GREEN)✔ Migrations complete.$(RESET)"
 
 migrate-down: ## Rollback the last Alembic migration

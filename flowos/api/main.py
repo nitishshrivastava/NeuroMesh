@@ -207,7 +207,10 @@ def create_app() -> FastAPI:
     from api.routers.handoffs import router as handoffs_router
     from api.routers.events import router as events_router
 
-    api_prefix = "/api/v1"
+    # The Vite dev proxy rewrites /api/* -> /* (strips the /api prefix).
+    # So the backend must serve routes at /workflows, /tasks, etc. (no prefix).
+    # In production (direct access), the reverse proxy should also strip /api.
+    api_prefix = ""
 
     app.include_router(workflows_router, prefix=api_prefix)
     app.include_router(tasks_router, prefix=api_prefix)

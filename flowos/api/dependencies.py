@@ -78,6 +78,10 @@ def get_producer(request: Request) -> FlowOSProducer:
 
     Raises:
         HTTPException 503: If the producer is not available (startup failure).
+
+    Use this dependency on endpoints that REQUIRE Kafka (write operations that
+    must publish events).  For read-only endpoints, use ``get_optional_producer``
+    which returns ``None`` instead of raising.
     """
     producer: FlowOSProducer | None = getattr(request.app.state, "producer", None)
     if producer is None:
@@ -88,8 +92,24 @@ def get_producer(request: Request) -> FlowOSProducer:
     return producer
 
 
-# Type alias
+def get_optional_producer(request: Request) -> FlowOSProducer | None:
+    """
+    FastAPI dependency that returns the application-level Kafka producer,
+    or ``None`` if Kafka is unavailable.
+
+    Unlike ``get_producer``, this dependency does NOT raise an exception when
+    Kafka is unavailable.  Use this for endpoints where Kafka is optional
+    (e.g. write endpoints that should still persist to DB even if Kafka is down).
+
+    Returns:
+        The Kafka producer instance, or ``None`` if unavailable.
+    """
+    return getattr(request.app.state, "producer", None)
+
+
+# Type aliases
 KafkaProducer = Annotated[FlowOSProducer, Depends(get_producer)]
+OptionalKafkaProducer = Annotated[FlowOSProducer | None, Depends(get_optional_producer)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -40,9 +40,11 @@ import {
   Brain,
   Users,
   Activity,
+  Plus,
 } from 'lucide-react'
 
 import { WorkflowGraph } from './components/WorkflowGraph/WorkflowGraph'
+import { CreateWorkflowModal } from './components/CreateWorkflowModal/CreateWorkflowModal'
 import { TaskPanel } from './components/TaskPanel/TaskPanel'
 import { EventTimeline } from './components/EventTimeline/EventTimeline'
 import { CheckpointViewer } from './components/CheckpointViewer/CheckpointViewer'
@@ -538,6 +540,7 @@ function TopBar() {
   const upsertWorkflow = useWorkflowStore((s) => s.upsertWorkflow)
 
   const [actionLoading, setActionLoading] = useState(false)
+  const [showCreateModal, setShowCreateModal] = useState(false)
 
   const handleCancel = useCallback(async () => {
     if (!selectedWorkflow) return
@@ -725,6 +728,44 @@ function TopBar() {
           </button>
         )}
 
+      {/* + New Workflow button */}
+      <button
+        onClick={() => setShowCreateModal(true)}
+        title="Create a new workflow"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+          fontSize: 11,
+          fontWeight: 700,
+          padding: '5px 12px',
+          borderRadius: 6,
+          border: '1px solid rgba(99,102,241,0.5)',
+          background: 'rgba(99,102,241,0.12)',
+          color: '#818cf8',
+          cursor: 'pointer',
+          transition: 'all 0.15s ease',
+          flexShrink: 0,
+        }}
+        onMouseEnter={(e) => {
+          ;(e.currentTarget as HTMLButtonElement).style.background =
+            'rgba(99,102,241,0.22)'
+          ;(e.currentTarget as HTMLButtonElement).style.borderColor =
+            'rgba(99,102,241,0.7)'
+          ;(e.currentTarget as HTMLButtonElement).style.color = '#a5b4fc'
+        }}
+        onMouseLeave={(e) => {
+          ;(e.currentTarget as HTMLButtonElement).style.background =
+            'rgba(99,102,241,0.12)'
+          ;(e.currentTarget as HTMLButtonElement).style.borderColor =
+            'rgba(99,102,241,0.5)'
+          ;(e.currentTarget as HTMLButtonElement).style.color = '#818cf8'
+        }}
+      >
+        <Plus size={12} strokeWidth={2.5} />
+        New Workflow
+      </button>
+
       {/* WS status dot */}
       <div
         style={{
@@ -745,6 +786,12 @@ function TopBar() {
               : 'none',
         }}
         title={`WebSocket: ${wsStatus}`}
+      />
+
+      {/* Create Workflow Modal */}
+      <CreateWorkflowModal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
       />
     </div>
   )

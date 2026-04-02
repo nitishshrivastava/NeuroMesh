@@ -12,7 +12,10 @@
 
 import axios, { AxiosError } from 'axios'
 import type { AxiosInstance, AxiosResponse } from 'axios'
-import type { Workflow, Task, FlowEvent } from '../store/workflowStore'
+import type { Workflow, Task, FlowEvent, Agent } from '../store/workflowStore'
+
+// Re-export Agent so existing imports of `type Agent` from this module keep working
+export type { Agent }
 
 // ─── Axios instance ───────────────────────────────────────────────────────────
 
@@ -205,19 +208,6 @@ export async function listWorkflowEvents(
 }
 
 // ─── Agent endpoints ──────────────────────────────────────────────────────────
-
-export interface Agent {
-  agent_id: string
-  name: string
-  agent_type: string
-  status: string
-  capabilities: string[]
-  current_task_id: string | null
-  project: string | null
-  tags: string[]
-  registered_at: string
-  last_seen_at: string | null
-}
 
 export async function listAgents(): Promise<PaginatedResponse<Agent>> {
   const res: AxiosResponse<PaginatedResponse<Agent>> = await apiClient.get(

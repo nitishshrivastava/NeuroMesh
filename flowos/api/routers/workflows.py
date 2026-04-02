@@ -24,10 +24,14 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
-from api.dependencies import DBSession, KafkaProducer, OptionalAgentID, Pagination, RequiredAgentID
+from api.dependencies import (
+    DBSession,
+    OptionalAgentID,
+    OptionalKafkaProducer,
+    Pagination,
+)
 from shared.db.models import TaskORM, WorkflowORM
 from shared.kafka.schemas import (
     WorkflowCancelledPayload,
@@ -180,13 +184,14 @@ def _orm_to_response(wf: WorkflowORM) -> WorkflowResponse:
     description=(
         "Creates a new workflow instance and publishes a WORKFLOW_CREATED event "
         "to the Kafka event bus.  The orchestrator picks up the event and begins "
-        "durable execution via Temporal."
+        "durable execution via Temporal.  If Kafka is unavailable, the workflow "
+        "is still persisted to the database and the event is skipped with a warning."
     ),
 )
 async def create_workflow(
     body: WorkflowCreateRequest,
     db: DBSession,
-    producer: KafkaProducer,
+    producer: OptionalKafkaProducer,
     agent_id: OptionalAgentID,
 ) -> WorkflowResponse:
     """Start a new workflow from a definition payload."""
@@ -230,32 +235,38 @@ async def create_workflow(
     db.add(wf)
     await db.flush()
 
-    # Publish WORKFLOW_CREATED event
-    try:
-        payload = WorkflowCreatedPayload(
-            workflow_id=workflow_id,
-            name=body.name,
-            trigger=body.trigger,
-            owner_agent_id=owner,
-            project=body.project,
-            inputs=body.inputs,
-            tags=body.tags,
-        )
-        event = build_event(
-            event_type=EventType.WORKFLOW_CREATED,
-            payload=payload,
-            source=EventSource.API,
-            workflow_id=workflow_id,
-            agent_id=owner,
-        )
-        producer.produce(event)
-    except Exception as exc:
+    # Publish WORKFLOW_CREATED event (optional — Kafka may be unavailable)
+    if producer is not None:
+        try:
+            payload = WorkflowCreatedPayload(
+                workflow_id=workflow_id,
+                name=body.name,
+                trigger=body.trigger,
+                owner_agent_id=owner,
+                project=body.project,
+                inputs=body.inputs,
+                tags=body.tags,
+            )
+            evt = build_event(
+                event_type=EventType.WORKFLOW_CREATED,
+                payload=payload,
+                source=EventSource.API,
+                workflow_id=workflow_id,
+                agent_id=owner,
+            )
+            producer.produce(evt)
+        except Exception as exc:
+            logger.warning(
+                "Failed to publish WORKFLOW_CREATED event for workflow %s: %s",
+                workflow_id,
+                exc,
+            )
+            # Don't fail the request — the record is persisted
+    else:
         logger.warning(
-            "Failed to publish WORKFLOW_CREATED event for workflow %s: %s",
+            "Kafka producer unavailable — WORKFLOW_CREATED event not published for workflow %s",
             workflow_id,
-            exc,
         )
-        # Don't fail the request — the record is persisted
 
     logger.info("Created workflow %s (%s)", workflow_id, body.name)
     return _orm_to_response(wf)
@@ -284,44 +295,66 @@ async def list_workflows(
     owner_agent_id: str | None = Query(default=None, description="Filter by owner agent ID."),
     tag: str | None = Query(default=None, description="Filter by tag (exact match)."),
 ) -> WorkflowListResponse:
-    """List workflow instances with optional filters."""
-    stmt = select(WorkflowORM).order_by(WorkflowORM.created_at.desc())
+    """List workflow instances with optional filters.
 
-    if status_filter:
-        stmt = stmt.where(WorkflowORM.status == status_filter)
-    if project:
-        stmt = stmt.where(WorkflowORM.project == project)
-    if owner_agent_id:
-        stmt = stmt.where(WorkflowORM.owner_agent_id == owner_agent_id)
-    if tag:
-        # JSONB array contains operator
-        stmt = stmt.where(WorkflowORM.tags.contains([tag]))
+    Returns an empty list (HTTP 200) if the database is empty or unreachable,
+    rather than propagating a 500 error.  This allows the UI sidebar to render
+    an empty state instead of an error state when the system is first starting.
+    """
+    try:
+        stmt = select(WorkflowORM).order_by(WorkflowORM.created_at.desc())
 
-    # Count total (without pagination)
-    count_stmt = select(WorkflowORM).order_by(None)
-    if status_filter:
-        count_stmt = count_stmt.where(WorkflowORM.status == status_filter)
-    if project:
-        count_stmt = count_stmt.where(WorkflowORM.project == project)
-    if owner_agent_id:
-        count_stmt = count_stmt.where(WorkflowORM.owner_agent_id == owner_agent_id)
-    if tag:
-        count_stmt = count_stmt.where(WorkflowORM.tags.contains([tag]))
+        if status_filter:
+            stmt = stmt.where(WorkflowORM.status == status_filter)
+        if project:
+            stmt = stmt.where(WorkflowORM.project == project)
+        if owner_agent_id:
+            stmt = stmt.where(WorkflowORM.owner_agent_id == owner_agent_id)
+        if tag:
+            # JSONB array contains operator
+            stmt = stmt.where(WorkflowORM.tags.contains([tag]))
 
-    total_result = await db.execute(count_stmt)
-    total = len(total_result.scalars().all())
+        # Count total (without pagination)
+        count_stmt = select(WorkflowORM).order_by(None)
+        if status_filter:
+            count_stmt = count_stmt.where(WorkflowORM.status == status_filter)
+        if project:
+            count_stmt = count_stmt.where(WorkflowORM.project == project)
+        if owner_agent_id:
+            count_stmt = count_stmt.where(WorkflowORM.owner_agent_id == owner_agent_id)
+        if tag:
+            count_stmt = count_stmt.where(WorkflowORM.tags.contains([tag]))
 
-    # Apply pagination
-    stmt = stmt.offset(pagination.offset).limit(pagination.limit)
-    result = await db.execute(stmt)
-    workflows = result.scalars().all()
+        total_result = await db.execute(count_stmt)
+        total = len(total_result.scalars().all())
 
-    return WorkflowListResponse(
-        items=[_orm_to_response(wf) for wf in workflows],
-        total=total,
-        limit=pagination.limit,
-        offset=pagination.offset,
-    )
+        # Apply pagination
+        stmt = stmt.offset(pagination.offset).limit(pagination.limit)
+        result = await db.execute(stmt)
+        workflows = result.scalars().all()
+
+        return WorkflowListResponse(
+            items=[_orm_to_response(wf) for wf in workflows],
+            total=total,
+            limit=pagination.limit,
+            offset=pagination.offset,
+        )
+
+    except Exception as exc:
+        # Log the error but return an empty list rather than a 500.
+        # This allows the UI to show an empty state while the DB is starting up
+        # or when migrations have not yet been applied.
+        logger.error(
+            "Failed to list workflows (DB may be unavailable or migrations pending): %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return WorkflowListResponse(
+            items=[],
+            total=0,
+            limit=pagination.limit,
+            offset=pagination.offset,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -340,13 +373,27 @@ async def get_workflow(
     db: DBSession,
 ) -> WorkflowResponse:
     """Retrieve a workflow by ID."""
-    wf = await db.get(WorkflowORM, workflow_id)
-    if wf is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Workflow {workflow_id!r} not found.",
+    try:
+        wf = await db.get(WorkflowORM, workflow_id)
+        if wf is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Workflow {workflow_id!r} not found.",
+            )
+        return _orm_to_response(wf)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to retrieve workflow %s: %s: %s",
+            workflow_id,
+            type(exc).__name__,
+            exc,
         )
-    return _orm_to_response(wf)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is temporarily unavailable. Please try again shortly.",
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -397,14 +444,15 @@ async def update_workflow(
     description=(
         "Cancels a running or paused workflow.  Publishes a WORKFLOW_CANCELLED "
         "event to the Kafka event bus so the orchestrator can terminate the "
-        "Temporal workflow."
+        "Temporal workflow.  If Kafka is unavailable, the status is still updated "
+        "in the database."
     ),
 )
 async def cancel_workflow(
     workflow_id: str,
     body: WorkflowCancelRequest,
     db: DBSession,
-    producer: KafkaProducer,
+    producer: OptionalKafkaProducer,
     agent_id: OptionalAgentID,
 ) -> WorkflowResponse:
     """Cancel a running or paused workflow."""
@@ -428,24 +476,30 @@ async def cancel_workflow(
     wf.status = WorkflowStatus.CANCELLED
     await db.flush()
 
-    # Publish WORKFLOW_CANCELLED event
-    try:
-        payload = WorkflowCancelledPayload(
-            workflow_id=workflow_id,
-            name=wf.name,
-            reason=body.reason,
-            cancelled_by=agent_id,
+    # Publish WORKFLOW_CANCELLED event (optional — Kafka may be unavailable)
+    if producer is not None:
+        try:
+            payload = WorkflowCancelledPayload(
+                workflow_id=workflow_id,
+                name=wf.name,
+                reason=body.reason,
+                cancelled_by=agent_id,
+            )
+            evt = build_event(
+                event_type=EventType.WORKFLOW_CANCELLED,
+                payload=payload,
+                source=EventSource.API,
+                workflow_id=workflow_id,
+                agent_id=agent_id,
+            )
+            producer.produce(evt)
+        except Exception as exc:
+            logger.warning("Failed to publish WORKFLOW_CANCELLED event: %s", exc)
+    else:
+        logger.warning(
+            "Kafka producer unavailable — WORKFLOW_CANCELLED event not published for workflow %s",
+            workflow_id,
         )
-        event = build_event(
-            event_type=EventType.WORKFLOW_CANCELLED,
-            payload=payload,
-            source=EventSource.API,
-            workflow_id=workflow_id,
-            agent_id=agent_id,
-        )
-        producer.produce(event)
-    except Exception as exc:
-        logger.warning("Failed to publish WORKFLOW_CANCELLED event: %s", exc)
 
     await db.refresh(wf)
     return _orm_to_response(wf)
@@ -462,14 +516,15 @@ async def cancel_workflow(
     summary="Pause a running workflow",
     description=(
         "Pauses a running workflow.  Publishes a WORKFLOW_PAUSED event so the "
-        "orchestrator can signal the Temporal workflow to pause."
+        "orchestrator can signal the Temporal workflow to pause.  If Kafka is "
+        "unavailable, the status is still updated in the database."
     ),
 )
 async def pause_workflow(
     workflow_id: str,
     body: WorkflowPauseRequest,
     db: DBSession,
-    producer: KafkaProducer,
+    producer: OptionalKafkaProducer,
     agent_id: OptionalAgentID,
 ) -> WorkflowResponse:
     """Pause a running workflow."""
@@ -489,23 +544,29 @@ async def pause_workflow(
     wf.status = WorkflowStatus.PAUSED
     await db.flush()
 
-    try:
-        payload = WorkflowPausedPayload(
-            workflow_id=workflow_id,
-            name=wf.name,
-            reason=body.reason,
-            paused_by=agent_id,
+    if producer is not None:
+        try:
+            payload = WorkflowPausedPayload(
+                workflow_id=workflow_id,
+                name=wf.name,
+                reason=body.reason,
+                paused_by=agent_id,
+            )
+            evt = build_event(
+                event_type=EventType.WORKFLOW_PAUSED,
+                payload=payload,
+                source=EventSource.API,
+                workflow_id=workflow_id,
+                agent_id=agent_id,
+            )
+            producer.produce(evt)
+        except Exception as exc:
+            logger.warning("Failed to publish WORKFLOW_PAUSED event: %s", exc)
+    else:
+        logger.warning(
+            "Kafka producer unavailable — WORKFLOW_PAUSED event not published for workflow %s",
+            workflow_id,
         )
-        event = build_event(
-            event_type=EventType.WORKFLOW_PAUSED,
-            payload=payload,
-            source=EventSource.API,
-            workflow_id=workflow_id,
-            agent_id=agent_id,
-        )
-        producer.produce(event)
-    except Exception as exc:
-        logger.warning("Failed to publish WORKFLOW_PAUSED event: %s", exc)
 
     await db.refresh(wf)
     return _orm_to_response(wf)
@@ -522,13 +583,14 @@ async def pause_workflow(
     summary="Resume a paused workflow",
     description=(
         "Resumes a paused workflow.  Publishes a WORKFLOW_RESUMED event so the "
-        "orchestrator can signal the Temporal workflow to continue."
+        "orchestrator can signal the Temporal workflow to continue.  If Kafka is "
+        "unavailable, the status is still updated in the database."
     ),
 )
 async def resume_workflow(
     workflow_id: str,
     db: DBSession,
-    producer: KafkaProducer,
+    producer: OptionalKafkaProducer,
     agent_id: OptionalAgentID,
 ) -> WorkflowResponse:
     """Resume a paused workflow."""
@@ -548,22 +610,28 @@ async def resume_workflow(
     wf.status = WorkflowStatus.RUNNING
     await db.flush()
 
-    try:
-        payload = WorkflowResumedPayload(
-            workflow_id=workflow_id,
-            name=wf.name,
-            resumed_by=agent_id,
+    if producer is not None:
+        try:
+            payload = WorkflowResumedPayload(
+                workflow_id=workflow_id,
+                name=wf.name,
+                resumed_by=agent_id,
+            )
+            evt = build_event(
+                event_type=EventType.WORKFLOW_RESUMED,
+                payload=payload,
+                source=EventSource.API,
+                workflow_id=workflow_id,
+                agent_id=agent_id,
+            )
+            producer.produce(evt)
+        except Exception as exc:
+            logger.warning("Failed to publish WORKFLOW_RESUMED event: %s", exc)
+    else:
+        logger.warning(
+            "Kafka producer unavailable — WORKFLOW_RESUMED event not published for workflow %s",
+            workflow_id,
         )
-        event = build_event(
-            event_type=EventType.WORKFLOW_RESUMED,
-            payload=payload,
-            source=EventSource.API,
-            workflow_id=workflow_id,
-            agent_id=agent_id,
-        )
-        producer.produce(event)
-    except Exception as exc:
-        logger.warning("Failed to publish WORKFLOW_RESUMED event: %s", exc)
 
     await db.refresh(wf)
     return _orm_to_response(wf)
@@ -590,33 +658,50 @@ async def list_workflow_tasks(
     ),
 ) -> dict[str, Any]:
     """List tasks belonging to a workflow."""
-    # Verify workflow exists
-    wf = await db.get(WorkflowORM, workflow_id)
-    if wf is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Workflow {workflow_id!r} not found.",
+    try:
+        # Verify workflow exists
+        wf = await db.get(WorkflowORM, workflow_id)
+        if wf is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Workflow {workflow_id!r} not found.",
+            )
+
+        stmt = (
+            select(TaskORM)
+            .where(TaskORM.workflow_id == workflow_id)
+            .order_by(TaskORM.created_at.asc())
         )
+        if task_status:
+            stmt = stmt.where(TaskORM.status == task_status)
 
-    stmt = (
-        select(TaskORM)
-        .where(TaskORM.workflow_id == workflow_id)
-        .order_by(TaskORM.created_at.asc())
-    )
-    if task_status:
-        stmt = stmt.where(TaskORM.status == task_status)
+        result = await db.execute(stmt)
+        tasks = result.scalars().all()
 
-    result = await db.execute(stmt)
-    tasks = result.scalars().all()
+        # Apply pagination
+        total = len(tasks)
+        paginated = tasks[pagination.offset : pagination.offset + pagination.limit]
 
-    # Apply pagination
-    total = len(tasks)
-    paginated = tasks[pagination.offset : pagination.offset + pagination.limit]
-
-    return {
-        "workflow_id": workflow_id,
-        "items": [t.to_dict() for t in paginated],
-        "total": total,
-        "limit": pagination.limit,
-        "offset": pagination.offset,
-    }
+        return {
+            "workflow_id": workflow_id,
+            "items": [t.to_dict() for t in paginated],
+            "total": total,
+            "limit": pagination.limit,
+            "offset": pagination.offset,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to list tasks for workflow %s: %s: %s",
+            workflow_id,
+            type(exc).__name__,
+            exc,
+        )
+        return {
+            "workflow_id": workflow_id,
+            "items": [],
+            "total": 0,
+            "limit": pagination.limit,
+            "offset": pagination.offset,
+        }
